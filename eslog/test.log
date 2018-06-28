@@ -1,0 +1,3 @@
+[2018/06/26 16:30:07.357] [ERROR] (goapl/log4go.TestLog4go:9) 12345679
+[2018/06/26 16:30:07.357] [CRIT] (goapl/log4go.TestLog4go:10) 1,2
+[2018/06/26 16:30:07.357] [FATAL] (goapl/log4go.TestLog4go:11) 3,4
