@@ -48,6 +48,7 @@ var (
 
 // A LogRecord contains all of the pertinent information for each message
 type LogRecord struct {
+	logType  int       // 0 Rec, 1:rawText
 	level    level_t   // The log level
 	created  time.Time // The time at which the log message was created (nanoseconds)
 	source   string    // The message source
@@ -55,53 +56,90 @@ type LogRecord struct {
 	category string    // The category
 }
 
-/****** Logger ******/
-type LogWriterFilter struct {
+type LogModuleInfo struct{
+	name string
 	level level_t
-	LogWriter
 }
 
-/****** Module Logger ******/
+//
+// Logger object
+//
 
-type ModuleLogger struct {
-	name    string
-	filters map[string]*LogWriterFilter
+type Logger struct {
+	modules map[string]*LogModuleInfo
+	logWriters map[string]LogWriter
+	telnetWriter *TelnetLogWriter
 }
 
-func (m *ModuleLogger) AddWriter(lvl level_t, writer LogWriter) {
 
-	filter := LogWriterFilter{
-		lvl,
-		writer,
+func (this *Logger) AddWriter(writer LogWriter) {
+	this.logWriters[writer.Name()] = writer
+	if writer.Name() == "TelnetLogWriter" {
+		this.telnetWriter = writer.(*TelnetLogWriter)
+		this.telnetWriter.RegCommand("mlist", this, dbgModuleList, "Show all modules.")
 	}
-
-	m.filters[writer.Name()] = &filter
 }
 
-func (this *ModuleLogger) Close() {
-	for _, filter := range this.filters {
-		filter.Close()
+func (this *Logger) AddModule(name string, lvl level_t) {
+	this.modules[name] = &LogModuleInfo{
+		name:name,
+	    level:lvl,
 	}
 }
 
 // Set print level
-func (m *ModuleLogger) SetLevel(which string, level level_t) {
-	if filter, ok := m.filters[which]; ok {
-		filter.level = level
+func (this *Logger) SetLevel(which string, level level_t) {
+	if module, ok := this.modules[which]; ok {
+		module.level = level
 	}
 }
 
-func (m *ModuleLogger) Printf(lvl level_t, src, format string, args ...interface{}) {
-	skip := true
-	for _, filter := range m.filters {
-		if lvl > filter.level {
-			continue
-		}
 
-		skip = false
+func NewLogger() *Logger {
+	return &Logger{
+		modules: make(map[string]*LogModuleInfo),
+		logWriters:make(map[string]LogWriter),
+    }
+}
+
+func (this *Logger) Close() {
+	for _, v := range this.logWriters {
+		v.Close()
+	}
+}
+
+//
+//Internal functions
+//
+
+func (this *Logger) RawPrintf(format string, args ...interface{}) {
+
+	msg := format
+	if len(args) > 0 {
+		msg = fmt.Sprintf(format, args...)
 	}
 
-	if skip {
+	rec := &LogRecord{
+		logType:  1,
+		message:  msg,
+	}
+
+	// Write log
+	for _, filter := range this.logWriters {
+		filter.LogWrite(rec)
+	}
+}
+
+func (this *Logger) levelPrintf(calldep int, moduleName string, level level_t, format string, args ...interface{}) {
+
+	//Check module
+	if _, ok := this.modules[moduleName]; !ok {
+		return
+	}
+
+	// Check Level
+	m := this.modules[moduleName]
+	if level > m.level {
 		return
 	}
 
@@ -110,84 +148,24 @@ func (m *ModuleLogger) Printf(lvl level_t, src, format string, args ...interface
 		msg = fmt.Sprintf(format, args...)
 	}
 
-	rec := &LogRecord{
-		level:    level_t(lvl),
-		created:  time.Now(),
-		source:   src,
-		message:  msg,
-		category: m.name,
-	}
-
-	// Write log
-	for _, filter := range m.filters {
-		if lvl > filter.level {
-			continue
-		}
-
-		filter.LogWrite(rec)
-	}
-}
-
-//
-// Logger object
-//
-
-type Logger struct {
-	modules map[string]*ModuleLogger
-}
-
-func NewLogger() *Logger {
-	return &Logger{modules: make(map[string]*ModuleLogger)}
-}
-
-func (this *Logger) Close() {
-	for _, v := range this.modules {
-		v.Close()
-	}
-}
-
-func (this *Logger) Module(name string) *ModuleLogger {
-	if m, ok := this.modules[name]; ok {
-		return m
-	}
-
-	return nil
-}
-
-// Add Log Filter
-func (this *Logger) AddFilter(moduleName string, lvl level_t, writer LogWriter) *ModuleLogger {
-
-	if m, ok := this.modules[moduleName]; ok {
-		m.AddWriter(lvl, writer)
-		return m
-	}
-
-	m := ModuleLogger{
-		name:    moduleName,
-		filters: make(map[string]*LogWriterFilter),
-	}
-
-	m.AddWriter(lvl, writer)
-	this.modules[moduleName] = &m
-
-	return &m
-}
-
-func (this *Logger) Printf(name string, level level_t, format string, args ...interface{}) {
-
-	if _, ok := this.modules[name]; !ok {
-		return
-	}
-
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
+	_, filename, line, ok := runtime.Caller(calldep)
 	src := ""
 	if ok {
 		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
 	}
 
-	moduleLogger.Printf(level, src, format, args...)
+	rec := &LogRecord{
+		level:    level_t(level),
+		created:  time.Now(),
+		source:   src,
+		message:  msg,
+		category: moduleName,
+	}
+
+	// Write log
+	for _, writer := range this.logWriters {
+		writer.LogWrite(rec)
+	}
 }
 
 //
@@ -195,81 +173,39 @@ func (this *Logger) Printf(name string, level level_t, format string, args ...in
 //
 
 func (this *Logger) Fatal(name string, format string, args ...interface{}) {
-	if _, ok := this.modules[name]; !ok {
-		return
-	}
+	this.levelPrintf(2, name, FATAL, format, args...)
+}
 
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
-	src := ""
-	if ok {
-		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
-	}
-
-	moduleLogger.Printf(FATAL, src, format, args...)
+func (this *Logger) Debug(name string, format string, args ...interface{}) {
+	this.levelPrintf(2, name, DEBUG, format, args...)
 }
 
 func (this *Logger) Error(name string, format string, args ...interface{}) {
-	if _, ok := this.modules[name]; !ok {
-		return
-	}
-
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
-	src := ""
-	if ok {
-		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
-	}
-
-	moduleLogger.Printf(ERROR, src, format, args...)
+	this.levelPrintf(2, name, ERROR, format, args...)
 }
 
 func (this *Logger) Warn(name string, format string, args ...interface{}) {
-	if _, ok := this.modules[name]; !ok {
-		return
-	}
-
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
-	src := ""
-	if ok {
-		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
-	}
-
-	moduleLogger.Printf(WARN, src, format, args...)
+	this.levelPrintf(2, name, WARN, format, args...)
 }
 
 func (this *Logger) Info(name string, format string, args ...interface{}) {
-	if _, ok := this.modules[name]; !ok {
-		return
-	}
-
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
-	src := ""
-	if ok {
-		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
-	}
-
-	moduleLogger.Printf(INFO, src, format, args...)
+	this.levelPrintf(2, name, INFO, format, args...)
 }
 
 func (this *Logger) Trace(name string, format string, args ...interface{}) {
-	if _, ok := this.modules[name]; !ok {
-		return
+	this.levelPrintf(2, name, TRACE, format, args...)
+}
+
+
+//
+// Commands
+//
+
+func dbgModuleList(args ...interface{}) {
+	c := args[0].(*Logger)
+
+	for name, m := range c.modules {
+		outText:= fmt.Sprintf("%s:level=%s\n", name, m.level.String())
+		c.RawPrintf(outText)
 	}
-
-	moduleLogger, _ := this.modules[name]
-
-	_, filename, line, ok := runtime.Caller(1)
-	src := ""
-	if ok {
-		src = fmt.Sprintf("%s:%d", path.Base(filename), line)
-	}
-
-	moduleLogger.Printf(TRACE, src, format, args...)
 }

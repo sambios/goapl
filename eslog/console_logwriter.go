@@ -41,6 +41,7 @@ func (c *ConsoleLogWriter) LogWrite(rec *LogRecord) {
 	c.w <- rec
 }
 
+
 func (c *ConsoleLogWriter) Close() {
 	close(c.w)
 	time.Sleep(50 * time.Millisecond)
